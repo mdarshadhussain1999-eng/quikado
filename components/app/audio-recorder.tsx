@@ -3,6 +3,8 @@
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Mic, Square } from "lucide-react";
+import { EVENTS } from "@/lib/analytics/events";
+import { track } from "@/lib/analytics/client";
 
 type Props = {
   onTranscript: (text: string) => void;
@@ -28,6 +30,12 @@ export function AudioRecorder({ onTranscript, onStatus }: Props) {
     setUploading(true);
     onStatus("Transcribing audio…");
 
+    track(EVENTS.AUDIO_UPLOAD_STARTED, {
+      source: "audio-recorder",
+      blob_type: blob.type || "audio/webm",
+      blob_size: blob.size,
+    });
+
     try {
       const ext = blob.type.includes("wav")
         ? "wav"
@@ -50,24 +58,50 @@ export function AudioRecorder({ onTranscript, onStatus }: Props) {
       const json = await res.json().catch(() => null);
 
       if (res.status === 202 && json?.review) {
+        track(EVENTS.AUDIO_TRANSCRIPTION_FAILED, {
+          source: "audio-recorder",
+          reason: "under_review",
+        });
+
         onStatus(json?.error ?? "Audio transcript is under review.");
         return;
       }
 
       if (!res.ok) {
+        track(EVENTS.AUDIO_TRANSCRIPTION_FAILED, {
+          source: "audio-recorder",
+          reason: json?.error ?? "api_error",
+          status_code: res.status,
+        });
+
         onStatus(json?.error ?? "Audio transcription failed.");
         return;
       }
 
       const transcript = (json?.transcript ?? "").trim();
       if (!transcript) {
+        track(EVENTS.AUDIO_TRANSCRIPTION_FAILED, {
+          source: "audio-recorder",
+          reason: "empty_transcript",
+        });
+
         onStatus("No speech detected. Please try again.");
         return;
       }
 
+      track(EVENTS.AUDIO_TRANSCRIPTION_SUCCEEDED, {
+        source: "audio-recorder",
+        transcript_length: transcript.length,
+      });
+
       onTranscript(transcript);
       onStatus("Audio added to prompt ✅");
     } catch (e: any) {
+      track(EVENTS.AUDIO_TRANSCRIPTION_FAILED, {
+        source: "audio-recorder",
+        reason: e?.message ?? "audio_upload_failed",
+      });
+
       onStatus(e?.message ?? "Audio upload failed.");
     } finally {
       setUploading(false);
@@ -122,6 +156,12 @@ export function AudioRecorder({ onTranscript, onStatus }: Props) {
       mediaRecorderRef.current = recorder;
       recorder.start();
       setRecording(true);
+
+      track(EVENTS.AUDIO_RECORDING_STARTED, {
+        source: "audio-recorder",
+        mime_type: mimeType || "default",
+      });
+
       onStatus("Recording… tap stop when done.");
     } catch {
       cleanupStream();

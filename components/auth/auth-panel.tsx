@@ -1,30 +1,20 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { Session } from "@supabase/supabase-js";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { Session, User } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EVENTS } from "@/lib/analytics/events";
+import { resetAnalytics, track } from "@/lib/analytics/client";
 
 export function AuthPanel() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
+  const lastTrackedUserIdRef = useRef<string | null>(null);
 
-  // ✅ Create profile once per user (30 free credits)
-  const ensureProfile = async (email?: string | null) => {
-    const {
-      data: { user },
-      error: userErr,
-    } = await supabase.auth.getUser();
-
-    if (userErr) {
-      console.error("getUser error:", userErr.message);
-      return;
-    }
-    if (!user) return;
-
-    // Check if profile exists
+  const ensureProfile = async (user: User) => {
     const { data: existing, error: selErr } = await supabase
       .from("profiles")
       .select("id, credits")
@@ -33,31 +23,54 @@ export function AuthPanel() {
 
     if (selErr) {
       console.error("Profile select error:", selErr.message);
-      return;
+      return false;
     }
 
-    if (existing) return; // already exists
+    if (existing) return false;
 
-    // Create profile
     const { error: insErr } = await supabase.from("profiles").upsert(
-  {
-    id: user.id,
-    email: email ?? user.email ?? null,
-    credits: 30,
-    mode_default: "find",
-    theme: "dark",
-    whatsapp_share_allowed: false,
-  },
-  { onConflict: "id" }
-);
+      {
+        id: user.id,
+        email: user.email ?? null,
+        credits: 30,
+        mode_default: "find",
+        theme: "dark",
+        whatsapp_share_allowed: false,
+      },
+      { onConflict: "id" }
+    );
 
     if (insErr) {
       console.error("Profile insert error:", insErr.message);
+      return false;
     }
+
+    return true;
   };
 
   useEffect(() => {
     let mounted = true;
+
+    const syncSignedInUser = async (user: User) => {
+      const createdProfile = await ensureProfile(user);
+
+      if (lastTrackedUserIdRef.current !== user.id) {
+        track(EVENTS.AUTH_SUCCEEDED, {
+          provider: "google",
+          user_id: user.id,
+        });
+
+        if (createdProfile) {
+          track(EVENTS.PROFILE_CREATED, {
+            provider: "google",
+            user_id: user.id,
+            starting_credits: 30,
+          });
+        }
+
+        lastTrackedUserIdRef.current = user.id;
+      }
+    };
 
     supabase.auth.getSession().then(async ({ data, error }) => {
       if (error) console.error("getSession error:", error.message);
@@ -67,19 +80,26 @@ export function AuthPanel() {
       setLoading(false);
 
       if (data.session?.user) {
-        await ensureProfile(data.session.user.email);
+        await syncSignedInUser(data.session.user);
+      } else {
+        lastTrackedUserIdRef.current = null;
       }
     });
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
+    } = supabase.auth.onAuthStateChange(async (event, newSession) => {
+      if (!mounted) return;
+
       setSession(newSession ?? null);
       setLoading(false);
 
-      if (newSession?.user) {
-        await ensureProfile(newSession.user.email);
+      if (event === "SIGNED_OUT" || !newSession?.user) {
+        lastTrackedUserIdRef.current = null;
+        return;
       }
+
+      await syncSignedInUser(newSession.user);
     });
 
     return () => {
@@ -101,6 +121,7 @@ export function AuthPanel() {
   };
 
   const signOut = async () => {
+    resetAnalytics();
     const { error } = await supabase.auth.signOut();
     if (error) alert(`Sign out error: ${error.message}`);
   };

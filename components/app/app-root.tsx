@@ -5,6 +5,8 @@ import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { AppShell } from "@/components/app/app-shell";
 import { Splash } from "@/components/marketing/splash";
 import { Landing } from "@/components/marketing/landing";
+import { EVENTS } from "@/lib/analytics/events";
+import { track } from "@/lib/analytics/client";
 
 type Screen = "splash" | "landing" | "app";
 
@@ -12,12 +14,12 @@ export function AppRoot() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const [screen, setScreen] = useState<Screen>("splash");
 
-  // Ensure splash is visible at least this long
   const MIN_SPLASH_MS = 2500;
 
   const startRef = useRef<number>(Date.now());
   const queuedRef = useRef<Screen | null>(null);
   const splashDoneRef = useRef<boolean>(false);
+  const landingTrackedRef = useRef<boolean>(false);
 
   useEffect(() => {
     let alive = true;
@@ -46,7 +48,6 @@ export function AppRoot() {
     } = supabase.auth.onAuthStateChange((_event, session) => {
       const next: Screen = session ? "app" : "landing";
 
-      // During splash, queue the target screen but do not switch instantly
       if (!splashDoneRef.current) {
         queuedRef.current = next;
         return;
@@ -60,6 +61,19 @@ export function AppRoot() {
       subscription.unsubscribe();
     };
   }, [supabase]);
+
+  useEffect(() => {
+    if (screen === "landing" && !landingTrackedRef.current) {
+      track(EVENTS.LANDING_VIEWED, {
+        source: "app-root",
+      });
+      landingTrackedRef.current = true;
+    }
+
+    if (screen !== "landing") {
+      landingTrackedRef.current = false;
+    }
+  }, [screen]);
 
   const skipSplash = async () => {
     const { data } = await supabase.auth.getSession();
